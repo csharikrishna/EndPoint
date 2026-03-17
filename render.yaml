@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: smollm2-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: LLAMA_CPP_NO_ACCELERATE
+        value: "1"  # Disable BLAS to reduce memory spikes
+    plan: free  # 512MB RAM, 0.1 CPU

@@ -1,5 +1,8 @@
 fastapi
 uvicorn
 llama-cpp-python
-requests
 pydantic
+requests
+psutil
+# Build dependencies for llama-cpp-python
+cmake
