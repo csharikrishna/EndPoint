@@ -1,11 +1,15 @@
 # main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from llama_cpp import Llama
 import os
 import requests
 import logging
 import psutil
+import json
+import asyncio
 from typing import Optional
 
 # ─────────────────────────────────────────────────────────────
@@ -139,15 +143,51 @@ async def startup_event():
 # ─────────────────────────────────────────────────────────────
 # Endpoints
 # ─────────────────────────────────────────────────────────────
-@app.get("/", tags=["Root"])
-async def root():
-    return {
-        "name": "SmolLM2-360M API",
-        "version": "1.0.0",
-        "model": "SmolLM2-360M-Instruct (Q4_K_S)",
-        "status": "ready" if MODEL_READY else "loading",
-        "docs": "/docs"
-    }
+# ── Serve UI ──────────────────────────────────────────────────
+@app.get("/", response_class=FileResponse, include_in_schema=False)
+async def serve_ui():
+    return FileResponse("static/index.html")
+
+# ── SSE: Real-time metrics stream ─────────────────────────────
+@app.get("/metrics/stream", tags=["Monitoring"])
+async def metrics_stream(request: Request):
+    async def event_generator():
+        psutil.cpu_percent()          # prime the CPU baseline (first call is always 0)
+        while True:
+            if await request.is_disconnected():   # clean up when browser tab closes
+                logger.info("SSE client disconnected")
+                break
+            try:
+                mem  = psutil.virtual_memory()
+                cpu  = psutil.cpu_percent()
+                disk = psutil.disk_usage("/")
+                payload = {
+                    "cpu_percent":      round(cpu, 1),
+                    "cpu_count":        psutil.cpu_count(logical=True),
+                    "ram_percent":      round(mem.percent, 1),
+                    "ram_used_mb":      round(mem.used      / 1024 / 1024, 1),
+                    "ram_available_mb": round(mem.available / 1024 / 1024, 1),
+                    "ram_total_mb":     round(mem.total     / 1024 / 1024, 1),
+                    "disk_percent":     round(disk.percent, 1),
+                    "disk_free_gb":     round(disk.free  / 1024 ** 3, 2),
+                    "disk_total_gb":    round(disk.total / 1024 ** 3, 2),
+                    "model_loaded":     MODEL_READY,
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+            except Exception as e:
+                logger.error(f"Metrics SSE error: {e}")
+                yield "data: {}\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",      # ← disables Nginx/Render proxy buffer
+            "Connection":        "keep-alive",
+        },
+    )
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
