@@ -12,6 +12,8 @@ from typing import Optional
 # ─────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────
+# ✅ SmolLM2-360M-Instruct GGUF - Q4_K_S quantization (~200MB)
+# Perfect for Render free tier (512MB RAM limit)
 MODEL_URL = "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q4_k_s.gguf"
 MODEL_PATH = "model.gguf"
 MODEL_READY = False
@@ -32,7 +34,7 @@ GENERATION_CONFIG = {
     "max_tokens": 100,
     "temperature": 0.7,
     "top_p": 0.9,
-    "stop": ["</s>", "###", "\n\n", "User:", "assistant:"],
+    "stop": ["</s>", "###", "\n\n", "User:", "assistant:", "<|im_end|>"],
     "echo": False,
 }
 
@@ -42,7 +44,6 @@ GENERATION_CONFIG = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Limit process memory to ~450MB (leave ~62MB for OS/Python overhead)
 # NOTE: We have disabled manual `resource.setrlimit(RLIMIT_AS)` because limiting 
 # VIRTUAL memory to 450MB crashes Python's internal imports (like `re` and Pydantic)
 # on startup with "SystemError". Render's container will automatically enforce the 
@@ -53,8 +54,8 @@ logger.info("OS will handle memory limits (512MB free tier constraint).")
 # FastAPI App
 # ─────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="SmolLM2 API",
-    description="Lightweight LLM inference on Render free tier",
+    title="SmolLM2-360M API",
+    description="Lightweight LLM inference on Render free tier using SmolLM2-360M-Instruct",
     version="1.0.0"
 )
 
@@ -107,7 +108,7 @@ def load_model():
     global llm, MODEL_READY
     
     try:
-        logger.info("Loading SmolLM2-360M model...")
+        logger.info("Loading SmolLM2-360M-Instruct model...")
         llm = Llama(model_path=MODEL_PATH, **LLM_CONFIG)
         MODEL_READY = True
         logger.info("✅ Model loaded successfully!")
@@ -131,7 +132,7 @@ def init_model_background():
 async def startup_event():
     """Start model loading in background to avoid cold-start timeout"""
     import asyncio
-    logger.info("🚀 Starting SmolLM2 API...")
+    logger.info("🚀 Starting SmolLM2-360M API...")
     # Run model init in background thread to not block startup
     asyncio.create_task(asyncio.to_thread(init_model_background))
 
@@ -188,9 +189,10 @@ async def generate(request: GenerateRequest):
         
         # Extract and clean response
         response_text = output["choices"][0]["text"].strip()
-        tokens_used = len(output["choices"][0]["tokens"]) if "tokens" in output["choices"][0] else 0
+        # Count tokens more reliably
+        tokens_used = len(response_text.split())  # Approximate token count
         
-        logger.info(f"✅ Generated {tokens_used} tokens")
+        logger.info(f"✅ Generated response ({len(response_text)} chars)")
         return GenerateResponse(
             response=response_text,
             model="SmolLM2-360M-Instruct",
