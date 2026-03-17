@@ -43,11 +43,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Limit process memory to ~450MB (leave ~62MB for OS/Python overhead)
-try:
-    resource.setrlimit(resource.RLIMIT_AS, (450 * 1024 * 1024, 450 * 1024 * 1024))
-    logger.info("Memory limit set to 450MB")
-except Exception as e:
-    logger.warning(f"Could not set memory limit: {e}")
+# NOTE: We have disabled manual `resource.setrlimit(RLIMIT_AS)` because limiting 
+# VIRTUAL memory to 450MB crashes Python's internal imports (like `re` and Pydantic)
+# on startup with "SystemError". Render's container will automatically enforce the 
+# 512MB physical RAM limit, so we don't need this manual strict limit.
+logger.info("OS will handle memory limits (512MB free tier constraint).")
 
 # ─────────────────────────────────────────────────────────────
 # FastAPI App
