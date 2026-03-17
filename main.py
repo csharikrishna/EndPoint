@@ -1,20 +1,19 @@
 # main.py
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from llama_cpp import Llama
 import os
 import requests
 import logging
 import psutil
-import resource
 from typing import Optional
 
 # ─────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────
-# ✅ SmolLM2-360M-Instruct GGUF - Q4_K_S quantization (~200MB)
-# Perfect for Render free tier (512MB RAM limit)
-MODEL_URL = "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q4_k_s.gguf"
+# ✅ FIXED URL: Using bartowski repo which has the correct filename casing
+# File: SmolLM2-360M-Instruct-Q4_K_S.gguf (~200MB)
+MODEL_URL = "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_S.gguf"
 MODEL_PATH = "model.gguf"
 MODEL_READY = False
 
@@ -22,7 +21,7 @@ MODEL_READY = False
 LLM_CONFIG = {
     "n_ctx": 512,           # Small context window
     "n_threads": 2,         # Render free tier = 2 vCPU max
-    "n_gpu_layers": 0,      # Force CPU-only (no GPU on free tier)
+    "n_gpu_layers": 0,      # Force CPU-only
     "use_mlock": False,     # Don't lock model in RAM
     "use_mmap": True,       # Memory-map model file (saves RAM)
     "n_batch": 32,          # Small batch to reduce peak memory
@@ -39,15 +38,10 @@ GENERATION_CONFIG = {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Logging & Memory Limits
+# Logging
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# NOTE: We have disabled manual `resource.setrlimit(RLIMIT_AS)` because limiting 
-# VIRTUAL memory to 450MB crashes Python's internal imports (like `re` and Pydantic)
-# on startup with "SystemError". Render's container will automatically enforce the 
-# 512MB physical RAM limit, so we don't need this manual strict limit.
 logger.info("OS will handle memory limits (512MB free tier constraint).")
 
 # ─────────────────────────────────────────────────────────────
@@ -55,7 +49,7 @@ logger.info("OS will handle memory limits (512MB free tier constraint).")
 # ─────────────────────────────────────────────────────────────
 app = FastAPI(
     title="SmolLM2-360M API",
-    description="Lightweight LLM inference on Render free tier using SmolLM2-360M-Instruct",
+    description="Lightweight LLM inference on Render free tier",
     version="1.0.0"
 )
 
@@ -63,9 +57,9 @@ app = FastAPI(
 # Pydantic Models
 # ─────────────────────────────────────────────────────────────
 class GenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=500, description="Input prompt for the model")
-    max_tokens: Optional[int] = Field(default=100, ge=1, le=200, description="Max tokens to generate")
-    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=1.0, description="Sampling temperature")
+    prompt: str = Field(..., min_length=1, max_length=500, description="Input prompt")
+    max_tokens: Optional[int] = Field(default=100, ge=1, le=200)
+    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=1.0)
 
 class GenerateResponse(BaseModel):
     response: str
@@ -80,60 +74,66 @@ class HealthResponse(BaseModel):
     ram_available_mb: float
 
 # ─────────────────────────────────────────────────────────────
-# Model Loading
+# Model Loading Logic
 # ─────────────────────────────────────────────────────────────
 llm: Optional[Llama] = None
 
 def download_model():
-    """Download model with streaming to avoid memory spikes"""
+    """Download model with streaming"""
     if os.path.exists(MODEL_PATH):
-        logger.info(f"Model already exists at {MODEL_PATH}")
+        logger.info(f"✅ Model already exists at {MODEL_PATH}")
         return
     
-    logger.info(f"Downloading model from {MODEL_URL}...")
+    logger.info(f"⬇️ Downloading model from {MODEL_URL}...")
     try:
         with requests.get(MODEL_URL, stream=True, timeout=300) as r:
-            r.raise_for_status()
+            r.raise_for_status()  # This will raise 404 if URL is wrong
+            total_size = int(r.headers.get('content-length', 0))
+            downloaded = 0
+            
             with open(MODEL_PATH, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        # Simple progress log
+                        if total_size > 0 and downloaded % (1024 * 1024 * 10) == 0:
+                            logger.info(f"Downloaded {downloaded // (1024*1024)}MB / {total_size // (1024*1024)}MB")
+        
         logger.info(f"✅ Model downloaded successfully: {MODEL_PATH}")
     except Exception as e:
         logger.error(f"❌ Model download failed: {e}")
         raise
 
 def load_model():
-    """Load the LLM model with optimized settings"""
+    """Load the LLM model"""
     global llm, MODEL_READY
-    
     try:
-        logger.info("Loading SmolLM2-360M-Instruct model...")
+        logger.info("🧠 Loading SmolLM2-360M model into memory...")
         llm = Llama(model_path=MODEL_PATH, **LLM_CONFIG)
         MODEL_READY = True
-        logger.info("✅ Model loaded successfully!")
+        logger.info("✅ Model loaded successfully! Ready for inference.")
     except Exception as e:
         logger.error(f"❌ Model loading failed: {e}")
         MODEL_READY = False
         raise
 
 def init_model_background():
-    """Initialize model: download + load (run in background)"""
+    """Initialize model: download + load"""
     try:
         download_model()
         load_model()
     except Exception as e:
-        logger.error(f"Model initialization failed: {e}")
+        logger.error(f"💥 Model initialization failed: {e}")
 
 # ─────────────────────────────────────────────────────────────
 # Startup Events
 # ─────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    """Start model loading in background to avoid cold-start timeout"""
     import asyncio
-    logger.info("🚀 Starting SmolLM2-360M API...")
-    # Run model init in background thread to not block startup
+    logger.info("🚀 Starting SmolLM2 API...")
+    # Run in background to prevent Render timeout
     asyncio.create_task(asyncio.to_thread(init_model_background))
 
 # ─────────────────────────────────────────────────────────────
@@ -141,7 +141,6 @@ async def startup_event():
 # ─────────────────────────────────────────────────────────────
 @app.get("/", tags=["Root"])
 async def root():
-    """Root endpoint with API info"""
     return {
         "name": "SmolLM2-360M API",
         "version": "1.0.0",
@@ -152,7 +151,6 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """Health check endpoint with memory stats"""
     mem = psutil.virtual_memory()
     return HealthResponse(
         status="healthy" if MODEL_READY else "initializing",
@@ -163,36 +161,29 @@ async def health_check():
 
 @app.post("/generate", response_model=GenerateResponse, tags=["Inference"])
 async def generate(request: GenerateRequest):
-    """Generate text from prompt"""
     if not MODEL_READY or llm is None:
         raise HTTPException(
             status_code=503,
-            detail="Model not ready yet. Please wait ~30-60 seconds after deploy and try again."
+            detail="Model not ready yet. Please wait ~45-60 seconds after deploy."
         )
     
     try:
-        # Check memory before inference
         mem = psutil.virtual_memory()
         if mem.percent > 95:
-            logger.warning(f"High memory usage: {mem.percent}%")
+            logger.warning(f"⚠️ High memory usage: {mem.percent}%")
         
-        # Merge request params with defaults
         gen_config = {
             **GENERATION_CONFIG,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
         }
         
-        # Run inference
-        logger.info(f"Generating for prompt: {request.prompt[:50]}...")
+        logger.info(f"Generating for: {request.prompt[:30]}...")
         output = llm(request.prompt, **gen_config)
         
-        # Extract and clean response
         response_text = output["choices"][0]["text"].strip()
-        # Count tokens more reliably
-        tokens_used = len(response_text.split())  # Approximate token count
+        tokens_used = len(response_text.split())  # Approximate
         
-        logger.info(f"✅ Generated response ({len(response_text)} chars)")
         return GenerateResponse(
             response=response_text,
             model="SmolLM2-360M-Instruct",
@@ -206,22 +197,10 @@ async def generate(request: GenerateRequest):
 
 @app.get("/warmup", tags=["Utilities"])
 async def warmup():
-    """Endpoint to trigger a dummy generation (helps with cold starts)"""
     if not MODEL_READY:
         raise HTTPException(503, "Model not ready")
-    
     try:
-        _ = llm("Hello", max_tokens=10, temperature=0)
-        return {"status": "warmed up", "message": "Dummy generation complete"}
+        _ = llm("Hello", max_tokens=5, temperature=0)
+        return {"status": "warmed up"}
     except Exception as e:
         raise HTTPException(500, f"Warmup failed: {str(e)}")
-
-# ─────────────────────────────────────────────────────────────
-# Optional: Shutdown cleanup
-# ─────────────────────────────────────────────────────────────
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("🔌 Shutting down...")
-    global llm
-    if llm:
-        del llm
